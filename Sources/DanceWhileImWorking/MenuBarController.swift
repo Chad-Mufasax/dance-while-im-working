@@ -14,6 +14,9 @@ final class MenuBarController: NSObject {
     private weak var autoPressItem: NSMenuItem?
     private weak var pauseItem: NSMenuItem?
 
+    /// Injected so the "Run diagnostic…" menu item can trigger a snapshot dump.
+    var diagnosticProvider: (() -> PromptDetector?)?
+
     init(state: AppState) {
         self.state = state
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -43,6 +46,10 @@ final class MenuBarController: NSObject {
         let ax = NSMenuItem(title: "Open Accessibility Settings…", action: #selector(openAccessibility), keyEquivalent: "")
         ax.target = self
         menu.addItem(ax)
+
+        let diag = NSMenuItem(title: "Run diagnostic…", action: #selector(runDiagnostic), keyEquivalent: "")
+        diag.target = self
+        menu.addItem(diag)
 
         let about = NSMenuItem(title: "About dance-while-im-working", action: #selector(openRepo), keyEquivalent: "")
         about.target = self
@@ -121,6 +128,22 @@ final class MenuBarController: NSObject {
     @objc private func openRepo() {
         if let url = URL(string: "https://github.com/Chad-Mufasax/dance-while-im-working") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func runDiagnostic() {
+        guard let detector = diagnosticProvider?() else { return }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Desktop/dance-diag.txt")
+        do {
+            try detector.writeDiagnostic(to: url)
+            NSWorkspace.shared.open(url)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Diagnostic failed"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.runModal()
         }
     }
 }
