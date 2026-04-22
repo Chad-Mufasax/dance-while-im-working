@@ -4,17 +4,29 @@ import ApplicationServices
 final class PromptDetector {
     private let state: AppState
     private var timer: Timer?
-    private var lastMatch = false
 
     private let pollInterval: TimeInterval = 0.5
-    private let autoPressCooldown: TimeInterval = 2.0
+    private let autoPressCooldown: TimeInterval = 3.0
     private let maxDepth = 40
+    private let textBudget = 32_000
 
-    private let signals = [
-        "Do you want to proceed?",
+    /// Phrases that identify a Claude Code permission prompt.
+    /// We match on the question *and* the numbered-option list together
+    /// to avoid firing on plain shell output that just happens to contain
+    /// "Yes" or question marks.
+    private let requiredAll: [String] = [
+        "Do you want to proceed?"
+    ]
+    private let requiredAny: [String] = [
         "1. Yes",
         "❯ 1. Yes"
     ]
+
+    /// PID of the process currently displaying the prompt, once confirmed.
+    /// Enter is only ever posted to this PID.
+    private var lockedPid: pid_t?
+    private var lockedStreak: Int = 0
+    private let confirmTicks = 2 // need N consecutive detections before auto-press
 
     init(state: AppState) {
         self.state = state
@@ -43,56 +55,94 @@ final class PromptDetector {
     private func tick() {
         if state.paused {
             if state.isDancing { state.isDancing = false }
-            lastMatch = false
+            lockedPid = nil
+            lockedStreak = 0
             return
         }
-        let match = detectPrompt()
-        if match != lastMatch {
-            lastMatch = match
-            state.isDancing = match
+
+        let matchPid = findPromptPid()
+        let isMatch = matchPid != nil
+
+        if isMatch != state.isDancing {
+            state.isDancing = isMatch
         }
-        if match && state.autoPressEnter {
+
+        guard let pid = matchPid else {
+            lockedPid = nil
+            lockedStreak = 0
+            return
+        }
+
+        if lockedPid == pid {
+            lockedStreak += 1
+        } else {
+            lockedPid = pid
+            lockedStreak = 1
+        }
+
+        if state.autoPressEnter && lockedStreak >= confirmTicks {
             let now = Date()
             if let last = state.lastAutoPressAt, now.timeIntervalSince(last) < autoPressCooldown {
                 return
             }
             state.lastAutoPressAt = now
-            KeyPresser.pressReturn()
+            KeyPresser.pressReturn(pid: pid)
         }
     }
 
-    private func detectPrompt() -> Bool {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return false }
-        let axApp = AXUIElementCreateApplication(frontApp.processIdentifier)
-        var focused: AnyObject?
-        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &focused) == .success,
-              let window = focused else { return false }
-        var buffer = ""
-        collectText(from: window as! AXUIElement, into: &buffer, depth: 0, budget: 32_000)
-        for signal in signals where buffer.contains(signal) {
-            return true
+    /// Walks every visible regular app's windows and returns the PID of the
+    /// one whose UI contains the Claude permission prompt, or nil.
+    /// This intentionally does NOT require the terminal to be frontmost —
+    /// that lets the user work elsewhere while the app still detects the prompt.
+    private func findPromptPid() -> pid_t? {
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && !$0.isTerminated
+        }
+        for app in apps {
+            if windowContainsPrompt(pid: app.processIdentifier) {
+                return app.processIdentifier
+            }
+        }
+        return nil
+    }
+
+    private func windowContainsPrompt(pid: pid_t) -> Bool {
+        let axApp = AXUIElementCreateApplication(pid)
+        var windowsRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
+              let windows = windowsRef as? [AXUIElement] else { return false }
+        for window in windows {
+            var buffer = ""
+            collectText(from: window, into: &buffer, depth: 0)
+            if matches(buffer) { return true }
         }
         return false
     }
 
-    private func collectText(from element: AXUIElement, into out: inout String, depth: Int, budget: Int) {
+    private func matches(_ text: String) -> Bool {
+        for needle in requiredAll where !text.contains(needle) { return false }
+        for needle in requiredAny where text.contains(needle) { return true }
+        return false
+    }
+
+    private func collectText(from element: AXUIElement, into out: inout String, depth: Int) {
         if depth > maxDepth { return }
-        if out.count > budget { return }
+        if out.count > textBudget { return }
         for attr in [kAXValueAttribute, kAXDescriptionAttribute, kAXTitleAttribute, kAXSelectedTextAttribute] {
             var v: AnyObject?
             if AXUIElementCopyAttributeValue(element, attr as CFString, &v) == .success,
                let s = v as? String, !s.isEmpty {
                 out.append(s)
                 out.append("\n")
-                if out.count > budget { return }
+                if out.count > textBudget { return }
             }
         }
         var children: AnyObject?
         if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
            let arr = children as? [AXUIElement] {
             for child in arr {
-                collectText(from: child, into: &out, depth: depth + 1, budget: budget)
-                if out.count > budget { return }
+                collectText(from: child, into: &out, depth: depth + 1)
+                if out.count > textBudget { return }
             }
         }
     }
