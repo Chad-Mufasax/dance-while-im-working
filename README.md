@@ -10,7 +10,7 @@ auto-yes →  dancer sends Return to your terminal whenever a prompt pops
 
 ## Why
 
-Claude Code keeps asking permission mid-flow. If you trust what it's doing, you want a heads-up when it's stuck + a way to say "yes" from anywhere on your desk. This is that.
+Claude Code keeps asking permission mid-flow. If you trust what it's doing, you want a heads-up when it's stuck + a way to say "yes" from anywhere on your desk. This is that, You can scroll in peace now .
 
 ## Install
 
